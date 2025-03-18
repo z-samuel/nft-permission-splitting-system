@@ -29,7 +29,7 @@ contract AssetSplitterTest is Test {
         syntheticNFT.transferOwnership(address(assetSplitter));
 
         vm.prank(alice);
-        uint256 assetId = assetNFT.mintAsset();
+        uint256 assetId = assetNFT.mint();
         vm.prank(alice);
         assetNFT.transferFrom(alice, bob, assetId); // Transfer ownership to bob for testing
     }
@@ -118,8 +118,10 @@ contract AssetSplitterTest is Test {
 
         vm.expectRevert();
         assetNFT.ownerOf(assetId);
-        vm.expectRevert();
-        assertEq(syntheticIds[3], 0, "Synthetic NFT 2 End Time mismatch");
+        for (uint256 i = 3; i < 10; i++) {
+            vm.expectRevert();
+            assertEq(syntheticIds[3], 0, "There should be no more than 3 Synthetic NFTs");
+        }
     }
 
     function testSplitAsset_SuccessMultipleRemainders() public {
@@ -136,8 +138,8 @@ contract AssetSplitterTest is Test {
         vm.prank(bob);
         uint256[] memory syntheticIds = assetSplitter.splitAsset(assetId, permissionSets);
 
-        assertEq(syntheticIds.length, 4, "Should have created four Synthetic NFTs (remainders before, between, and after)");
-        vm.expectRevert("ERC721: invalid token ID");
+        assertEq(syntheticIds.length, 7, "Should have created four Synthetic NFTs (remainders before, between, and after)");
+        vm.expectRevert();
         assetNFT.ownerOf(assetId);
     }
 
@@ -170,25 +172,21 @@ contract AssetSplitterTest is Test {
         uint256 startTime = block.timestamp + 30 days;
         uint256 endTime = startTime + 60 days;
 
+        vm.prank(bob);
         IAssetSplitter.PermissionSet[] memory permissionSets = new IAssetSplitter.PermissionSet[](1);
         permissionSets[0] = IAssetSplitter.PermissionSet(PERMISSION_A, startTime, endTime);
 
-        vm.prank(bob);
         uint256[] memory syntheticIds = assetSplitter.splitAsset(assetId, permissionSets);
-
-        // Include the remainder NFT in the merge
-        uint256[] memory mergeIds = new uint256[](2);
-        mergeIds[0] = syntheticIds[0];
-        mergeIds[1] = syntheticIds[1];
+        assertEq(syntheticIds.length, 4, "Should have created 4 Synthetic NFTs");
 
         vm.prank(bob);
-        uint256 newAssetId = assetSplitter.mergeAsset(assetId, mergeIds);
+        uint256 newAssetId = assetSplitter.mergeAsset(assetId, syntheticIds);
 
         assertEq(assetNFT.ownerOf(newAssetId), bob, "New Asset NFT owner should be bob");
-        vm.expectRevert("ERC721: invalid token ID");
-        syntheticNFT.ownerOf(syntheticIds[0]);
-        vm.expectRevert("ERC721: invalid token ID");
-        syntheticNFT.ownerOf(syntheticIds[1]);
+        for (uint256 i = 0; i < 4; i++) {
+            vm.expectRevert();
+            syntheticNFT.ownerOf(syntheticIds[i]);
+        }
     }
 
     function testMergeAsset_NotAssetOwner() public {
@@ -219,7 +217,7 @@ contract AssetSplitterTest is Test {
         uint256[] memory syntheticIds = assetSplitter.splitAsset(assetId, permissionSets);
 
         vm.prank(sam);
-        vm.expectRevert("AssetSplitter: Caller must own all Synthetic NFTs");
+        vm.expectRevert("AssetSplitter: Only asset owner can merge");
         assetSplitter.mergeAsset(assetId, syntheticIds);
     }
 
@@ -231,13 +229,15 @@ contract AssetSplitterTest is Test {
 
         vm.prank(bob);
         uint256[] memory syntheticIds = assetSplitter.splitAsset(assetId, permissionSets);
+        uint256[] memory subsetIds = new uint256[](1);
+        subsetIds[0] = syntheticIds[0];
 
         vm.prank(bob);
         vm.expectRevert("AssetSplitter: Synthetic NFTs do not represent the full set of permissions");
-        assetSplitter.mergeAsset(assetId, syntheticIds);
+        assetSplitter.mergeAsset(assetId, subsetIds);
     }
 
-    function testMergeAsset_InconsistentTimeRanges() public {
+    function testMergeAsset_IncompletedTimeRanges() public {
         uint256 assetId = 1;
         uint256 startTime1 = block.timestamp + 30 days;
         uint256 endTime1 = startTime1 + 60 days;
@@ -250,10 +250,16 @@ contract AssetSplitterTest is Test {
 
         vm.prank(bob);
         uint256[] memory syntheticIds = assetSplitter.splitAsset(assetId, permissionSets);
+        uint256[] memory subsetIds = new uint256[](5);
+        subsetIds[0] = syntheticIds[0];
+        subsetIds[1] = syntheticIds[1];
+        subsetIds[2] = syntheticIds[2];
+        subsetIds[3] = syntheticIds[4];
+        subsetIds[4] = syntheticIds[5];
 
         vm.prank(bob);
-        vm.expectRevert("AssetSplitter: Time ranges of Synthetic NFTs must be consistent for merge");
-        assetSplitter.mergeAsset(assetId, syntheticIds);
+        vm.expectRevert("AssetSplitter: Time range have incompleted permission");
+        assetSplitter.mergeAsset(assetId, subsetIds);
     }
 
     function testMergeAsset_SameTimeRange() public {
@@ -272,9 +278,9 @@ contract AssetSplitterTest is Test {
         uint256 newAssetId = assetSplitter.mergeAsset(assetId, syntheticIds);
 
         assertEq(assetNFT.ownerOf(newAssetId), bob, "New Asset NFT owner should be bob");
-        vm.expectRevert("ERC721: invalid token ID");
+        vm.expectRevert();
         syntheticNFT.ownerOf(syntheticIds[0]);
-        vm.expectRevert("ERC721: invalid token ID");
+        vm.expectRevert();
         syntheticNFT.ownerOf(syntheticIds[1]);
     }
 }

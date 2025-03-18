@@ -12,17 +12,12 @@ contract AssetSplitter is Ownable, IAssetSplitter {
 
     uint256 public constant FULL_PERMISSIONS = 7; // PERMISSION_A | PERMISSION_B | PERMISSION_C
 
+    // Map of original Asset NFT owners, for combining Synthetic NFTs back to Asset NFT
+    mapping(uint256 => address) public originalAssetNFTOwners;
+
     constructor(address _assetNFT, address _syntheticNFT) Ownable(msg.sender) {
         assetNFT = AssetNFT(_assetNFT);
         syntheticNFT = SyntheticNFT(_syntheticNFT);
-    }
-
-    function min(uint256 a, uint256 b) internal pure returns (uint256) {
-        return a <= b ? a : b;
-    }
-
-    function max(uint256 a, uint256 b) internal pure returns (uint256) {
-        return a >= b ? a : b;
     }
 
     function splitAsset(
@@ -45,6 +40,7 @@ contract AssetSplitter is Ownable, IAssetSplitter {
         uint256 syntheticIdIndex = 0;
 
         uint256 totalPermissionsAccountedFor = 0;
+        uint256 lastStartTime = 0;
         uint256 lastEndTime = 0;
         uint256 remainderPermissions = FULL_PERMISSIONS;
         address caller = msg.sender;
@@ -85,7 +81,9 @@ contract AssetSplitter is Ownable, IAssetSplitter {
                 );
                 syntheticTokenIds[syntheticIdIndex++] = gapSyntheticId;
             }
-            remainderPermissions = FULL_PERMISSIONS; // Reset for the next period
+            if (currentStartTime > lastStartTime) {
+                remainderPermissions = FULL_PERMISSIONS; // Reset for the next period
+            }
 
             // Mint SyntheticNFT for the current permission set
             uint256 syntheticId = syntheticNFT.mintSyntheticNFT(
@@ -126,6 +124,7 @@ contract AssetSplitter is Ownable, IAssetSplitter {
                 }
             }
             lastEndTime = currentEndTime;
+            lastStartTime = currentStartTime;
         }
 
         if (lastEndTime > 0) {
@@ -141,6 +140,7 @@ contract AssetSplitter is Ownable, IAssetSplitter {
         }
 
         assetNFT.burn(originalAssetId);
+        originalAssetNFTOwners[originalAssetId] = msg.sender;
 
         emit AssetSplit(originalAssetId, syntheticTokenIds);
         return syntheticTokenIds;
@@ -157,51 +157,50 @@ contract AssetSplitter is Ownable, IAssetSplitter {
         uint256 assetTokenId,
         uint256[] calldata syntheticTokenIds
     ) external override returns (uint256 newAssetTokenId) {
-        require(assetNFT.ownerOf(assetTokenId) == msg.sender, "AssetSplitter: Only asset owner can merge");
-
-        uint256 combinedPermissions = 0;
-        uint256 originalAssetId = 0;
-        uint256 minStartTime = type(uint256).max;
-        uint256 maxEndTime = 0;
+        require(originalAssetNFTOwners[assetTokenId] == msg.sender, "AssetSplitter: Only asset owner can merge");
         uint256 numSplits = syntheticTokenIds.length;
-        bool hasTimeRestriction = false;
+        require(numSplits > 0, "AssetSplitter: number of synthetic NFTs cannot be zero");
+        uint256[] memory sortedSyntheticTokenIds = new uint256[](numSplits);
+        for (uint256 i = 0; i < numSplits; i ++) {
+            sortedSyntheticTokenIds[i] = syntheticTokenIds[i];
+        }
+        
+        // Simple bubble sort, can be optimized
+        for (uint256 i = 0; i < numSplits - 1; i++) {
+            for (uint256 j = 0; j < numSplits - i - 1; j++) {
+                if (sortedSyntheticTokenIds[j] > sortedSyntheticTokenIds[j + 1]) {
+                    uint256 temp = sortedSyntheticTokenIds[j];
+                    sortedSyntheticTokenIds[j] = sortedSyntheticTokenIds[j + 1];
+                    sortedSyntheticTokenIds[j + 1] = temp;
+                }
+            }
+        }
 
-        for (uint256 i = 0; i < numSplits; i++) {
-            uint256 syntheticId = syntheticTokenIds[i];
-            require(syntheticNFT.ownerOf(syntheticId) == msg.sender, "AssetSplitter: Caller must own all Synthetic NFTs");
-            (uint256 assetId, uint256 permissions, uint256 startTime, uint256 endTime) = syntheticNFT.syntheticNFTData(syntheticId);
-            if (originalAssetId == 0) {
-                originalAssetId = assetId;
+        (,uint256 sumPermission, uint256 curStartTime,) = syntheticNFT.syntheticNFTData(sortedSyntheticTokenIds[0]);
+        require(curStartTime == 0, "AssetSplitter: full combination should have a synthetic NFT which start time is the beginning");
+        for (uint256 i = 1; i < numSplits; i++) {
+            (,uint256 nextPermission, uint256 nextStartTime,) = syntheticNFT.syntheticNFTData(sortedSyntheticTokenIds[i]);
+            if (sumPermission == FULL_PERMISSIONS) {
+                sumPermission = 0; // Reset permission
+                require(nextStartTime > curStartTime, "AssetSplitter: Time range should not overlap for full permission");
             } else {
-                require(originalAssetId == assetId, "AssetSplitter: All Synthetic NFTs must belong to the same Asset NFT");
+                require(nextStartTime == curStartTime, "AssetSplitter: Time range have incompleted permission");
             }
-            combinedPermissions |= permissions;
-
-            if (startTime > 0 || endTime > 0) {
-                hasTimeRestriction = true;
-                minStartTime = min(minStartTime, startTime);
-                maxEndTime = max(maxEndTime, endTime == 0 ?type(uint256).max : endTime); // Arbitrary large end time if 0
-            }
+            require((sumPermission & nextPermission) == 0, "AssetSplitter: Permission should not overlaps");
+            sumPermission |= nextPermission;
+            curStartTime = nextStartTime;
         }
-
-        require(combinedPermissions == FULL_PERMISSIONS, "AssetSplitter: Synthetic NFTs do not represent the full set of permissions");
-        require(originalAssetId == assetTokenId, "AssetSplitter: Synthetic NFTs do not belong to the specified Asset NFT");
-
-        // Check if all Synthetic NFTs have the same time range if any are time-restricted
-        if (hasTimeRestriction) {
-            for (uint256 i = 0; i < numSplits; i++) {
-                (,, uint256 startTime, uint256 endTime) = syntheticNFT.syntheticNFTData(syntheticTokenIds[i]);
-                endTime = endTime == 0 ? type(uint256).max : endTime;
-
-                require(startTime == minStartTime && endTime == maxEndTime, "AssetSplitter: Time ranges of Synthetic NFTs must be consistent for merge");
-            }
-        }
-
+        (,,, uint256 endTime) = syntheticNFT.syntheticNFTData(sortedSyntheticTokenIds[numSplits - 1]);
+        require(endTime == 0, "AssetSplitter: full combination should have a synthetic NFT which start time is the end");
+        require(sumPermission == FULL_PERMISSIONS, "AssetSplitter: Synthetic NFTs do not represent the full set of permissions");
         // Mint a new AssetNFT
-        newAssetTokenId = assetNFT.mintAsset();
+        newAssetTokenId = assetNFT.mintAsset(msg.sender);
 
         // Burn all the Synthetic NFTs
         for (uint256 i = 0; i < numSplits; i++) {
+            if (syntheticTokenIds[i] == 0) {
+                continue;
+            }
             syntheticNFT.burn(syntheticTokenIds[i]);
         }
 

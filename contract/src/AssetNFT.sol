@@ -15,9 +15,15 @@ contract AssetNFT is ERC721, Ownable {
         _nextTokenId = 1;
     }
 
-    function mintAsset() public returns (uint256) {
+    function mint() public returns (uint256) {
         uint256 newItemId = _nextTokenId++;
         _safeMint(msg.sender, newItemId);
+        return newItemId;
+    }
+
+    function mintAsset(address recipient) public returns (uint256) {
+        uint256 newItemId = _nextTokenId++;
+        _safeMint(recipient, newItemId);
         return newItemId;
     }
 
